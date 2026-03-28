@@ -12,11 +12,15 @@ interface LayoutProps {
 export function Layout({ children }: LayoutProps) {
   const setAssistantOpen = useStore((s) => s.setAssistantOpen);
   const selectedTableId = useStore((s) => s.selectedTableId);
-  const [mobilePanel, setMobilePanel] = useState<'maps' | 'editor'>('maps');
+  const [mobilePanel, setMobilePanel] = useState<'maps' | 'editor'>(() =>
+    useStore.getState().selectedTableId ? 'editor' : 'maps'
+  );
 
   useEffect(() => {
     if (selectedTableId) {
       setMobilePanel('editor');
+    } else {
+      setMobilePanel('maps');
     }
   }, [selectedTableId]);
 
@@ -78,19 +82,22 @@ export function Layout({ children }: LayoutProps) {
             </button>
           </div>
 
-          <div className="flex flex-1 min-h-0 flex-col gap-3 md:flex-row md:gap-3">
+          <div className="flex min-h-0 flex-1 flex-col gap-3 md:flex-row md:gap-3">
+            {/* Mobile: show one panel. Desktop (md+): always show both — md:* overrides hidden */}
             <aside
-              className={`min-h-0 flex w-full flex-shrink-0 flex-col md:w-64 md:flex-initial ${
-                mobilePanel === 'maps' ? 'flex flex-1' : 'hidden md:flex'
-              } max-h-[min(52vh,520px)] overflow-hidden md:max-h-none`}
+              className={`min-h-0 flex w-full shrink-0 flex-col overflow-hidden md:w-64 md:max-h-none ${
+                mobilePanel === 'maps'
+                  ? 'max-h-[min(52vh,520px)] min-h-0 flex-1'
+                  : 'hidden'
+              } md:flex md:flex-none`}
             >
               <ParameterTree />
             </aside>
 
             <div
               className={`min-h-0 min-w-0 flex flex-1 flex-col ${
-                mobilePanel === 'editor' ? 'flex' : 'hidden md:flex'
-              }`}
+                mobilePanel === 'editor' ? '' : 'hidden'
+              } md:flex md:min-h-0 md:flex-1`}
             >
               {children}
             </div>

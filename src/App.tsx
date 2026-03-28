@@ -7,8 +7,10 @@ import { useStore } from './store/useStore';
 import { Code2, Grid3x3, Box } from 'lucide-react';
 
 function App() {
-  const { getSelectedTable } = useStore();
-  const selectedTable = getSelectedTable();
+  const selectedTable = useStore((s) => {
+    const id = s.selectedTableId;
+    return id ? s.tables.find((t) => t.id === id) : undefined;
+  });
   const [viewMode, setViewMode] = useState<'2d' | '3d'>('2d');
   
   return (
