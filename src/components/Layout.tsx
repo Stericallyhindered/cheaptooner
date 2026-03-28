@@ -1,5 +1,5 @@
 import { ReactNode } from 'react';
-import { MessageCircle } from 'lucide-react';
+import { BookOpen } from 'lucide-react';
 import { FileLoader } from './FileLoader';
 import { ParameterTree } from './ParameterTree';
 import { SaveButton } from './SaveButton';
@@ -25,9 +25,10 @@ export function Layout({ children }: LayoutProps) {
               type="button"
               onClick={() => setAssistantOpen(true)}
               className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium bg-dark-surface2 border border-dark-border rounded hover:bg-dark-border transition-colors"
+              title="MHD guide and MHD-only Q&A"
             >
-              <MessageCircle className="w-3.5 h-3.5" />
-              Chat
+              <BookOpen className="w-3.5 h-3.5" />
+              MHD guide
             </button>
             <SaveButton />
           </div>

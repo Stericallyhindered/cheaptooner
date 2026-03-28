@@ -56,7 +56,7 @@ The built files will be in the `dist` directory, ready for static hosting.
    - Use Shift+Click to extend selection
    - Use Ctrl/Cmd+Click for non-contiguous selection
 5. **View 3D**: Toggle to 3D view to see your table as a 3D surface
-6. **Save**: Click "Save BIN File" to download your modified calibration
+6. **Apply & export**: Use **Apply to BIN** on each map you edited (writes that table into memory), then **Export BIN** in the header to download the full calibration file
 
 ## Project Structure
 

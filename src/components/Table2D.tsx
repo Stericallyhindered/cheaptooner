@@ -13,7 +13,15 @@ import {
   textColorForBackground,
   deltaLineStyleForBackground,
 } from '../utils/heatmap';
-import { Eye, EyeOff, Save, RotateCcw } from 'lucide-react';
+import {
+  Eye,
+  EyeOff,
+  ArrowDownToLine,
+  RotateCcw,
+  Undo2,
+  Redo2,
+  CheckCircle2,
+} from 'lucide-react';
 import { TableEditor } from './TableEditor';
 
 interface Table2DProps {
@@ -39,6 +47,10 @@ export function Table2D({ table }: Table2DProps) {
     revertTable,
     saveTable,
     getTableChanges,
+    undo,
+    redo,
+    changes,
+    redoStack,
     compareMode,
     compareTableData,
     compareBinBuffer,
@@ -53,6 +65,14 @@ export function Table2D({ table }: Table2DProps) {
   const [selectStart, setSelectStart] = useState<{ row: number; col: number } | null>(null);
   const dragHappenedRef = useRef(false);
   const tableRef = useRef<HTMLDivElement>(null);
+  const [saveNotice, setSaveNotice] = useState<string | null>(null);
+  const saveNoticeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (saveNoticeTimerRef.current) clearTimeout(saveNoticeTimerRef.current);
+    };
+  }, []);
 
   useEffect(() => {
     const handleMouseUp = () => {
@@ -329,63 +349,127 @@ export function Table2D({ table }: Table2DProps) {
 
   const overlayAlpha = heatmapPrefs.selectionOverlayAlpha;
 
+  const groupDivider = (
+    <div
+      className="hidden sm:block w-px h-5 bg-dark-border/70 self-center shrink-0"
+      aria-hidden
+    />
+  );
+
   return (
     <div className="bg-dark-surface border border-dark-border rounded-lg overflow-hidden h-full flex flex-col">
-      <div className="p-2 border-b border-dark-border">
-        <div className="flex items-start justify-between gap-2">
-          <div className="min-w-0 flex-1">
+      <div className="p-2 border-b border-dark-border space-y-2">
+        <div className="flex flex-col gap-2 lg:flex-row lg:items-start lg:justify-between">
+          <div className="min-w-0 flex-1 space-y-1">
             <div
               className="flex items-baseline gap-1 min-w-0"
               title={table.description ? `${table.title} (${table.description})` : table.title}
             >
-              <h3 className="text-sm font-semibold mb-0.5 truncate">{table.title}</h3>
+              <h3 className="text-sm font-semibold mb-0 truncate">{table.title}</h3>
               {table.description && (
                 <span className="text-xs text-dark-text2 font-mono truncate">({table.description})</span>
               )}
             </div>
-            {table.units && <p className="text-xs text-dark-text2 mt-0.5">Units: {table.units}</p>}
+            {table.units && <p className="text-xs text-dark-text2">Units: {table.units}</p>}
+            <p className="text-[10px] text-dark-text2 leading-snug max-w-xl">
+              Edit one map at a time.{' '}
+              <span className="text-dark-text">Apply to BIN</span> copies this table into the in-memory
+              calibration (other maps stay as last applied).{' '}
+              <span className="text-dark-text">Reset table</span> restores only this map to load-time
+              values in memory — it does not reload the whole BIN file. Use{' '}
+              <span className="text-dark-text">Export BIN</span> in the header to download the full file.
+            </p>
           </div>
-          <div className="flex items-center gap-1 flex-shrink-0 flex-wrap justify-end">
+
+          <div className="flex flex-col gap-1.5 items-stretch lg:items-end shrink-0">
             {hasChanges && (
-              <span className="text-xs text-dark-accent px-1.5 py-0.5 rounded bg-dark-accent/10">
-                {tableChanges.length} change{tableChanges.length !== 1 ? 's' : ''}
+              <span className="text-[10px] text-dark-accent px-1.5 py-0.5 rounded bg-dark-accent/10 self-end tabular-nums">
+                {tableChanges.length} unsaved cell{tableChanges.length !== 1 ? 's' : ''} on this map
               </span>
             )}
-            {canRevert && (
+            <div className="flex flex-wrap items-center justify-end gap-1">
+              <span className="text-[10px] text-dark-text2 uppercase tracking-wide mr-0.5">History</span>
               <button
-                onClick={() => revertTable(table.id)}
-                className="flex items-center gap-1 px-2 py-1 bg-dark-surface2 hover:bg-dark-border border border-dark-border rounded text-xs transition-colors"
-                title="Revert table to original values"
+                type="button"
+                onClick={() => undo()}
+                disabled={!binBuffer || changes.length === 0}
+                className="flex items-center gap-1 px-2 py-1 bg-dark-surface2 hover:bg-dark-border border border-dark-border rounded text-xs transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                title="Undo the most recent cell edit anywhere in the session (global stack)"
+              >
+                <Undo2 className="w-3 h-3" />
+                <span>Undo</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => redo()}
+                disabled={!binBuffer || redoStack.length === 0}
+                className="flex items-center gap-1 px-2 py-1 bg-dark-surface2 hover:bg-dark-border border border-dark-border rounded text-xs transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                title="Redo the last undone cell edit"
+              >
+                <Redo2 className="w-3 h-3" />
+                <span>Redo</span>
+              </button>
+              {groupDivider}
+              <span className="text-[10px] text-dark-text2 uppercase tracking-wide mr-0.5">This map</span>
+              {canRevert && (
+                <button
+                  type="button"
+                  onClick={() => revertTable(table.id)}
+                  className="flex items-center gap-1 px-2 py-1 bg-dark-surface2 hover:bg-dark-border border border-dark-border rounded text-xs transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                  title="Reset only this map to values from when the BIN was loaded. Writes that snapshot into memory for this table only — other maps are unchanged."
+                  disabled={!hasChanges}
+                >
+                  <RotateCcw className="w-3 h-3" />
+                  <span>Reset table</span>
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={() => {
+                  if (!binBuffer || !data) return;
+                  writeTableData(binBuffer, table, data, false, true);
+                  saveTable(table.id);
+                  if (saveNoticeTimerRef.current) clearTimeout(saveNoticeTimerRef.current);
+                  setSaveNotice(
+                    `Applied "${table.title}" to in-memory BIN (this map only; Export BIN in header for a file)`
+                  );
+                  saveNoticeTimerRef.current = setTimeout(() => {
+                    setSaveNotice(null);
+                    saveNoticeTimerRef.current = null;
+                  }, 5000);
+                }}
+                className="flex items-center gap-1 px-2 py-1 bg-dark-accent hover:bg-dark-accentHover text-white rounded text-xs transition-colors font-medium disabled:opacity-40 disabled:cursor-not-allowed"
+                title="Write this map’s scaled cells into the loaded BIN in RAM. Does not create a file — use Export BIN in the header after applying each map you care about."
                 disabled={!hasChanges}
               >
-                <RotateCcw className="w-3 h-3" />
-                <span>Revert</span>
+                <ArrowDownToLine className="w-3 h-3" />
+                <span>Apply to BIN</span>
               </button>
-            )}
-            <button
-              onClick={() => {
-                if (!binBuffer || !data) return;
-                writeTableData(binBuffer, table, data, false, true);
-                saveTable(table.id);
-              }}
-              className="flex items-center gap-1 px-2 py-1 bg-dark-accent hover:bg-dark-accentHover text-white rounded text-xs transition-colors font-medium"
-              title="Save table changes"
-              disabled={!hasChanges}
-            >
-              <Save className="w-3 h-3" />
-              <span>Save Table</span>
-            </button>
-            <button
-              onClick={() => useStore.getState().toggleRawHex()}
-              className="flex items-center gap-1 px-2 py-1 bg-dark-surface2 hover:bg-dark-border border border-dark-border rounded text-xs transition-colors"
-              title={showRawHex ? 'Show scaled values' : 'Show raw hex values'}
-            >
-              {showRawHex ? <EyeOff className="w-3 h-3" /> : <Eye className="w-3 h-3" />}
-              <span>{showRawHex ? 'Raw' : 'Scaled'}</span>
-            </button>
+              {groupDivider}
+              <span className="text-[10px] text-dark-text2 uppercase tracking-wide mr-0.5">View</span>
+              <button
+                type="button"
+                onClick={() => useStore.getState().toggleRawHex()}
+                className="flex items-center gap-1 px-2 py-1 bg-dark-surface2 hover:bg-dark-border border border-dark-border rounded text-xs transition-colors"
+                title={showRawHex ? 'Show engineer units (scaled)' : 'Show raw storage values'}
+              >
+                {showRawHex ? <EyeOff className="w-3 h-3" /> : <Eye className="w-3 h-3" />}
+                <span>{showRawHex ? 'Raw' : 'Scaled'}</span>
+              </button>
+            </div>
           </div>
         </div>
       </div>
+
+      {saveNotice && (
+        <div
+          className="px-2 py-2 border-b border-dark-border flex items-center gap-2 text-xs bg-emerald-500/10 text-emerald-100/95"
+          role="status"
+        >
+          <CheckCircle2 className="w-3.5 h-3.5 shrink-0 text-emerald-400" aria-hidden />
+          <span>{saveNotice}</span>
+        </div>
+      )}
 
       <TableEditor table={table} />
 

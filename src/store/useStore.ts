@@ -1,8 +1,18 @@
 import { create } from 'zustand';
 import { ParsedTable } from '../types/xdf';
 import { TableData, Selection, CellChange } from '../types/bin';
-import { writeTableData } from '../parsers/binWriter';
+import { applyCellChange, writeTableData } from '../parsers/binWriter';
 import { readAllTables } from '../parsers/binReader';
+
+/** Rebuild per-table change lists from the global chronological list. */
+function rebuildTableChanges(changes: CellChange[]): Map<string, CellChange[]> {
+  const tableChanges = new Map<string, CellChange[]>();
+  for (const c of changes) {
+    const list = tableChanges.get(c.tableId) ?? [];
+    tableChanges.set(c.tableId, [...list, c]);
+  }
+  return tableChanges;
+}
 
 interface AppState {
   // Files
@@ -30,10 +40,11 @@ interface AppState {
   /** MHD / OpenRouter chat panel */
   assistantOpen: boolean;
   
-  // Change tracking
+  // Change tracking (global stack — last edit may be on any table)
   changes: CellChange[];
-  changeHistory: CellChange[][]; // For undo/redo
-  tableChanges: Map<string, CellChange[]>; // Track changes per table
+  /** Undone edits, most recent last — cleared when a new edit is made */
+  redoStack: CellChange[];
+  tableChanges: Map<string, CellChange[]>; // Derived from `changes` per table
   
   // Actions
   setXDFContent: (content: string, filename?: string | null) => void;
@@ -82,7 +93,7 @@ export const useStore = create<AppState>((set, get) => ({
   showRawHex: false,
   assistantOpen: false,
   changes: [],
-  changeHistory: [],
+  redoStack: [],
   tableChanges: new Map(),
   
   // Actions
@@ -152,17 +163,15 @@ export const useStore = create<AppState>((set, get) => ({
   
   addChange: (change) => {
     const changes = [...get().changes, change];
-    const changeHistory = [...get().changeHistory, changes];
-    
-    // Track changes per table
-    const tableChanges = new Map(get().tableChanges);
-    const tableChangeList = tableChanges.get(change.tableId) || [];
-    tableChanges.set(change.tableId, [...tableChangeList, change]);
-    
-    set({ changes, changeHistory, tableChanges });
+    set({
+      changes,
+      tableChanges: rebuildTableChanges(changes),
+      redoStack: [],
+    });
   },
-  
-  clearChanges: () => set({ changes: [], changeHistory: [], tableChanges: new Map() }),
+
+  clearChanges: () =>
+    set({ changes: [], redoStack: [], tableChanges: new Map() }),
   
   getTableChanges: (tableId) => {
     return get().tableChanges.get(tableId) || [];
@@ -184,14 +193,14 @@ export const useStore = create<AppState>((set, get) => ({
       writeTableData(binBuffer, table, originalData, false, true);
     }
     
-    // Remove changes for this table
-    const tableChanges = new Map(get().tableChanges);
-    tableChanges.delete(tableId);
-    
-    // Remove from global changes
-    const changes = get().changes.filter(c => c.tableId !== tableId);
-    
-    set({ tableData, tableChanges, changes });
+    const changes = get().changes.filter((c) => c.tableId !== tableId);
+
+    set({
+      tableData,
+      changes,
+      tableChanges: rebuildTableChanges(changes),
+      redoStack: [],
+    });
   },
   
   saveTable: (tableId) => {
@@ -210,16 +219,68 @@ export const useStore = create<AppState>((set, get) => ({
   },
   
   undo: () => {
-    const history = get().changeHistory;
-    if (history.length > 1) {
-      const newHistory = history.slice(0, -1);
-      const newChanges = newHistory[newHistory.length - 1] || [];
-      set({ changes: newChanges, changeHistory: newHistory });
-    }
+    const changes = get().changes;
+    if (changes.length === 0) return;
+
+    const last = changes[changes.length - 1];
+    const binBuffer = get().binBuffer;
+    const table = get().tables.find((t) => t.id === last.tableId);
+    const data = get().tableData.get(last.tableId);
+    if (!binBuffer || !table?.address || !data) return;
+
+    const reverse: CellChange = {
+      ...last,
+      newValue: last.oldValue,
+      newRawValue: last.oldRawValue,
+    };
+    applyCellChange(binBuffer, table, reverse);
+
+    const newValues = data.values.map((row) => [...row]);
+    const newRaws = data.rawValues.map((row) => [...row]);
+    newValues[last.row][last.col] = last.oldValue;
+    newRaws[last.row][last.col] = last.oldRawValue;
+
+    const updated = { ...data, values: newValues, rawValues: newRaws };
+    const tableData = new Map(get().tableData);
+    tableData.set(last.tableId, updated);
+
+    const newChanges = changes.slice(0, -1);
+    set({
+      changes: newChanges,
+      tableChanges: rebuildTableChanges(newChanges),
+      tableData,
+      redoStack: [...get().redoStack, last],
+    });
   },
-  
+
   redo: () => {
-    // Implementation for redo if needed
+    const redoStack = get().redoStack;
+    if (redoStack.length === 0) return;
+
+    const last = redoStack[redoStack.length - 1];
+    const binBuffer = get().binBuffer;
+    const table = get().tables.find((t) => t.id === last.tableId);
+    const data = get().tableData.get(last.tableId);
+    if (!binBuffer || !table?.address || !data) return;
+
+    applyCellChange(binBuffer, table, last);
+
+    const newValues = data.values.map((row) => [...row]);
+    const newRaws = data.rawValues.map((row) => [...row]);
+    newValues[last.row][last.col] = last.newValue;
+    newRaws[last.row][last.col] = last.newRawValue;
+
+    const updated = { ...data, values: newValues, rawValues: newRaws };
+    const tableData = new Map(get().tableData);
+    tableData.set(last.tableId, updated);
+
+    const newChanges = [...get().changes, last];
+    set({
+      changes: newChanges,
+      tableChanges: rebuildTableChanges(newChanges),
+      tableData,
+      redoStack: redoStack.slice(0, -1),
+    });
   },
   
   // Computed

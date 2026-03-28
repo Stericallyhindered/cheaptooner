@@ -2,7 +2,7 @@
 
 ## Files
 - **XDF**: Definition file listing tables, addresses, scaling, axes.
-- **BIN**: Calibration binary edited in place in memory; use **Save BIN** to export.
+- **BIN**: Calibration binary edited in memory; **Export BIN** (header) downloads the full file.
 
 ## Main areas
 - **Parameter tree**: Search and select a table (map).
@@ -26,8 +26,10 @@
 - **Quick**: ±1 offset, ±5% buttons.
 
 ## Per-table actions
-- **Save Table**: Write current table from memory into the BIN buffer.
-- **Revert**: Restore table from snapshot taken when BIN was loaded (for that table).
+- **Apply to BIN**: Write this map’s cells from the editor into the in-memory BIN (other maps unchanged until you apply them).
+- **Reset table**: Restore **only this map** from the snapshot taken when the BIN was loaded (does not reload the whole file).
+- **Undo / Redo**: Cell-edit history (global order across maps).
+- **Export BIN** (header): Download the full calibration from memory to a `.bin` file.
 - **Compare BIN** (optional): Load a second BIN with the same XDF; enable compare mode to show per-cell delta vs compare file.
 
 ## Heatmap
