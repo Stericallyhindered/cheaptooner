@@ -1,0 +1,607 @@
+import { useState, useRef, useEffect, useMemo, useCallback } from 'react';
+import { useStore } from '../store/useStore';
+import { TUNING_CELL_HEATMAP } from '../types/uiPreferences';
+import { ParsedTable } from '../types/xdf';
+import { CellChange } from '../types/bin';
+import { formatValue, formatDeltaDisplay, roundValue, unscaleValue } from '../utils/dataConversion';
+import { clampValue } from '../utils/validation';
+import { applyCellChange, writeTableData } from '../parsers/binWriter';
+import { commitFullTableValues } from '../utils/tableCommit';
+import {
+  getHeatmapRange,
+  valueToHeatmapColor,
+  textColorForBackground,
+  deltaLineStyleForBackground,
+} from '../utils/heatmap';
+import { Eye, EyeOff, Save, RotateCcw } from 'lucide-react';
+import { TableEditor } from './TableEditor';
+
+interface Table2DProps {
+  table: ParsedTable;
+}
+
+const paddingClass = {
+  compact: 'px-1.5 py-1',
+  normal: 'px-2.5 py-1.5',
+  relaxed: 'px-3 py-2',
+} as const;
+
+export function Table2D({ table }: Table2DProps) {
+  const {
+    tableData,
+    originalTableData,
+    showRawHex,
+    binBuffer,
+    setTableData,
+    addChange,
+    setSelection,
+    selection,
+    revertTable,
+    saveTable,
+    getTableChanges,
+    compareMode,
+    compareTableData,
+    compareBinBuffer,
+    compareBinFileName,
+  } = useStore();
+  const heatmapPrefs = TUNING_CELL_HEATMAP;
+
+  const data = tableData.get(table.id);
+  const [editingCell, setEditingCell] = useState<{ row: number; col: number } | null>(null);
+  const [editValue, setEditValue] = useState('');
+  const [selecting, setSelecting] = useState(false);
+  const [selectStart, setSelectStart] = useState<{ row: number; col: number } | null>(null);
+  const dragHappenedRef = useRef(false);
+  const tableRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const handleMouseUp = () => {
+      setSelecting(false);
+    };
+    document.addEventListener('mouseup', handleMouseUp);
+    return () => document.removeEventListener('mouseup', handleMouseUp);
+  }, []);
+
+  useEffect(() => {
+    if (!data) return;
+    const root = tableRef.current;
+    if (!root) return;
+    const blockSelectStart = (e: Event) => {
+      const t = e.target as HTMLElement | null;
+      if (!t) return;
+      if (t.closest('input, textarea')) return;
+      e.preventDefault();
+    };
+    root.addEventListener('selectstart', blockSelectStart, true);
+    return () => root.removeEventListener('selectstart', blockSelectStart, true);
+  }, [data]);
+
+  const values = data ? (showRawHex ? data.rawValues : data.values) : [];
+  const allFlat = useMemo(() => values.flat(), [values]);
+
+  const selectionFlat = useMemo(() => {
+    if (!selection || selection.tableId !== table.id || selection.cells.length === 0) return null;
+    return selection.cells.map((c) => values[c.row][c.col]);
+  }, [selection, table.id, values]);
+
+  const heatRange = useMemo(() => {
+    if (allFlat.length === 0) return { min: 0, max: 1 };
+    return getHeatmapRange(
+      allFlat,
+      heatmapPrefs.rangeMode,
+      selectionFlat,
+      heatmapPrefs.fixedMin,
+      heatmapPrefs.fixedMax
+    );
+  }, [allFlat, heatmapPrefs.rangeMode, heatmapPrefs.fixedMin, heatmapPrefs.fixedMax, selectionFlat]);
+
+  const getCellColor = useCallback(
+    (value: number) => valueToHeatmapColor(value, heatmapPrefs, heatRange),
+    [heatmapPrefs, heatRange]
+  );
+
+  if (!data) {
+    return (
+      <div className="bg-dark-surface border border-dark-border rounded-lg p-6">
+        <p className="text-dark-text2">No data available for this table</p>
+      </div>
+    );
+  }
+
+  const xAxisLabels =
+    data.xAxisValues.length > 0 ? data.xAxisValues : Array.from({ length: table.colCount }, (_, i) => i);
+  const yAxisLabels =
+    data.yAxisValues.length > 0 ? data.yAxisValues : Array.from({ length: table.rowCount }, (_, i) => i);
+
+  const compareData = compareTableData?.get(table.id);
+  const compareValues =
+    compareMode && compareData
+      ? showRawHex
+        ? compareData.rawValues
+        : compareData.values
+      : undefined;
+
+  const binsAreIdentical = useMemo(() => {
+    const a = binBuffer;
+    const b = compareBinBuffer;
+    if (!a || !b || a.byteLength === 0 || b.byteLength === 0) return false;
+    if (a.byteLength !== b.byteLength) return false;
+    const va = new Uint8Array(a);
+    const vb = new Uint8Array(b);
+    for (let i = 0; i < va.length; i++) {
+      if (va[i] !== vb[i]) return false;
+    }
+    return true;
+  }, [binBuffer, compareBinBuffer]);
+
+  const compareSummary = useMemo(() => {
+    if (!compareMode || !compareBinFileName) return null;
+    if (!compareData || !data) return { kind: 'missing' as const };
+    const a = showRawHex ? data.rawValues : data.values;
+    const b = showRawHex ? compareData.rawValues : compareData.values;
+    if (!a?.length || !b?.length) return { kind: 'missing' as const };
+    let diffCells = 0;
+    let maxAbs = 0;
+    for (let r = 0; r < a.length; r++) {
+      const ar = a[r];
+      const br = b[r];
+      if (!ar || !br) continue;
+      for (let c = 0; c < ar.length; c++) {
+        if (c >= br.length) continue;
+        const d = ar[c] - br[c];
+        const ad = Math.abs(d);
+        if (ad > 1e-12) {
+          diffCells++;
+          maxAbs = Math.max(maxAbs, ad);
+        }
+      }
+    }
+    return { kind: 'ok' as const, diffCells, maxAbs };
+  }, [compareMode, compareBinFileName, compareData, data, showRawHex]);
+
+  const handleCellClick = (row: number, col: number, e: React.MouseEvent) => {
+    if (dragHappenedRef.current) {
+      dragHappenedRef.current = false;
+      return;
+    }
+    if (e.shiftKey && selectStart) {
+      const minRow = Math.min(selectStart.row, row);
+      const maxRow = Math.max(selectStart.row, row);
+      const minCol = Math.min(selectStart.col, col);
+      const maxCol = Math.max(selectStart.col, col);
+      const cells: Array<{ row: number; col: number }> = [];
+      for (let r = minRow; r <= maxRow; r++) {
+        for (let c = minCol; c <= maxCol; c++) {
+          cells.push({ row: r, col: c });
+        }
+      }
+      setSelection({
+        tableId: table.id,
+        cells,
+        bounds: { minRow, maxRow, minCol, maxCol },
+      });
+    } else if (e.ctrlKey || e.metaKey) {
+      const existingCells = selection?.cells || [];
+      const cellExists = existingCells.some((c) => c.row === row && c.col === col);
+      if (cellExists) {
+        setSelection({
+          tableId: table.id,
+          cells: existingCells.filter((c) => !(c.row === row && c.col === col)),
+          bounds: selection?.bounds || { minRow: row, maxRow: row, minCol: col, maxCol: col },
+        });
+      } else {
+        const cells = [...existingCells, { row, col }];
+        let minRow = row,
+          maxRow = row,
+          minCol = col,
+          maxCol = col;
+        cells.forEach((c) => {
+          minRow = Math.min(minRow, c.row);
+          maxRow = Math.max(maxRow, c.row);
+          minCol = Math.min(minCol, c.col);
+          maxCol = Math.max(maxCol, c.col);
+        });
+        setSelection({
+          tableId: table.id,
+          cells,
+          bounds: { minRow, maxRow, minCol, maxCol },
+        });
+      }
+    } else {
+      setSelectStart({ row, col });
+      setSelection({
+        tableId: table.id,
+        cells: [{ row, col }],
+        bounds: { minRow: row, maxRow: row, minCol: col, maxCol: col },
+      });
+    }
+  };
+
+  const handleCellMouseDown = (row: number, col: number, e: React.MouseEvent) => {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    dragHappenedRef.current = false;
+    setSelecting(true);
+    setSelectStart({ row, col });
+    setSelection({
+      tableId: table.id,
+      cells: [{ row, col }],
+      bounds: { minRow: row, maxRow: row, minCol: col, maxCol: col },
+    });
+  };
+
+  const handleCellMouseEnter = (row: number, col: number) => {
+    if (selecting && selectStart) {
+      dragHappenedRef.current = true;
+      const minRow = Math.min(selectStart.row, row);
+      const maxRow = Math.max(selectStart.row, row);
+      const minCol = Math.min(selectStart.col, col);
+      const maxCol = Math.max(selectStart.col, col);
+      const cells: Array<{ row: number; col: number }> = [];
+      for (let r = minRow; r <= maxRow; r++) {
+        for (let c = minCol; c <= maxCol; c++) {
+          cells.push({ row: r, col: c });
+        }
+      }
+      setSelection({
+        tableId: table.id,
+        cells,
+        bounds: { minRow, maxRow, minCol, maxCol },
+      });
+    }
+  };
+
+  const handleCellDoubleClick = (row: number, col: number) => {
+    const value = values[row][col];
+    setEditingCell({ row, col });
+    setEditValue(value.toString());
+  };
+
+  const handleEditSubmit = () => {
+    if (!editingCell || !binBuffer) return;
+    const newValue = parseFloat(editValue);
+    if (isNaN(newValue)) {
+      setEditingCell(null);
+      return;
+    }
+    const clampedValue = clampValue(newValue, table.min, table.max);
+    const roundedValue = roundValue(clampedValue, table.decimalPlaces);
+    const oldValue = data.values[editingCell.row][editingCell.col];
+    const oldRawValue = data.rawValues[editingCell.row][editingCell.col];
+    const newRawValue = unscaleValue(roundedValue, table.mathEquation);
+    const newData = { ...data };
+    newData.values[editingCell.row][editingCell.col] = roundedValue;
+    newData.rawValues[editingCell.row][editingCell.col] = Math.round(newRawValue);
+    const change: CellChange = {
+      tableId: table.id,
+      row: editingCell.row,
+      col: editingCell.col,
+      oldValue,
+      newValue: roundedValue,
+      oldRawValue,
+      newRawValue: Math.round(newRawValue),
+    };
+    applyCellChange(binBuffer, table, change);
+    addChange(change);
+    setTableData(table.id, newData);
+    setEditingCell(null);
+  };
+
+  const handleEditCancel = () => {
+    setEditingCell(null);
+  };
+
+  const isCellSelected = (row: number, col: number) =>
+    selection?.tableId === table.id && selection.cells.some((c) => c.row === row && c.col === col);
+
+  const getSelectionStats = () => {
+    if (!selection || selection.tableId !== table.id || selection.cells.length === 0) return null;
+    const selectedValues = selection.cells.map((c) => values[c.row][c.col]);
+    const min = Math.min(...selectedValues);
+    const max = Math.max(...selectedValues);
+    const avg = selectedValues.reduce((a, b) => a + b, 0) / selectedValues.length;
+    const sum = selectedValues.reduce((a, b) => a + b, 0);
+    return { count: selection.cells.length, min, max, avg, sum };
+  };
+
+  const stats = getSelectionStats();
+  const tableChanges = getTableChanges(table.id);
+  const hasChanges = tableChanges.length > 0;
+  const originalData = originalTableData.get(table.id);
+  const canRevert = originalData !== undefined;
+
+  const pad = paddingClass[heatmapPrefs.cellPadding];
+
+  const selBounds =
+    selection?.tableId === table.id ? selection.bounds : null;
+
+  const axisColHighlight = (colIdx: number) =>
+    heatmapPrefs.axisHighlight &&
+    selBounds &&
+    colIdx >= selBounds.minCol &&
+    colIdx <= selBounds.maxCol;
+
+  const axisRowHighlight = (rowIdx: number) =>
+    heatmapPrefs.axisHighlight &&
+    selBounds &&
+    rowIdx >= selBounds.minRow &&
+    rowIdx <= selBounds.maxRow;
+
+  const overlayAlpha = heatmapPrefs.selectionOverlayAlpha;
+
+  return (
+    <div className="bg-dark-surface border border-dark-border rounded-lg overflow-hidden h-full flex flex-col">
+      <div className="p-2 border-b border-dark-border">
+        <div className="flex items-start justify-between gap-2">
+          <div className="min-w-0 flex-1">
+            <div
+              className="flex items-baseline gap-1 min-w-0"
+              title={table.description ? `${table.title} (${table.description})` : table.title}
+            >
+              <h3 className="text-sm font-semibold mb-0.5 truncate">{table.title}</h3>
+              {table.description && (
+                <span className="text-xs text-dark-text2 font-mono truncate">({table.description})</span>
+              )}
+            </div>
+            {table.units && <p className="text-xs text-dark-text2 mt-0.5">Units: {table.units}</p>}
+          </div>
+          <div className="flex items-center gap-1 flex-shrink-0 flex-wrap justify-end">
+            {hasChanges && (
+              <span className="text-xs text-dark-accent px-1.5 py-0.5 rounded bg-dark-accent/10">
+                {tableChanges.length} change{tableChanges.length !== 1 ? 's' : ''}
+              </span>
+            )}
+            {canRevert && (
+              <button
+                onClick={() => revertTable(table.id)}
+                className="flex items-center gap-1 px-2 py-1 bg-dark-surface2 hover:bg-dark-border border border-dark-border rounded text-xs transition-colors"
+                title="Revert table to original values"
+                disabled={!hasChanges}
+              >
+                <RotateCcw className="w-3 h-3" />
+                <span>Revert</span>
+              </button>
+            )}
+            <button
+              onClick={() => {
+                if (!binBuffer || !data) return;
+                writeTableData(binBuffer, table, data, false, true);
+                saveTable(table.id);
+              }}
+              className="flex items-center gap-1 px-2 py-1 bg-dark-accent hover:bg-dark-accentHover text-white rounded text-xs transition-colors font-medium"
+              title="Save table changes"
+              disabled={!hasChanges}
+            >
+              <Save className="w-3 h-3" />
+              <span>Save Table</span>
+            </button>
+            <button
+              onClick={() => useStore.getState().toggleRawHex()}
+              className="flex items-center gap-1 px-2 py-1 bg-dark-surface2 hover:bg-dark-border border border-dark-border rounded text-xs transition-colors"
+              title={showRawHex ? 'Show scaled values' : 'Show raw hex values'}
+            >
+              {showRawHex ? <EyeOff className="w-3 h-3" /> : <Eye className="w-3 h-3" />}
+              <span>{showRawHex ? 'Raw' : 'Scaled'}</span>
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <TableEditor table={table} />
+
+      {compareMode && compareBinFileName && (
+        <div className="px-2 py-1.5 text-xs border-b border-dark-border space-y-1">
+          {binsAreIdentical ? (
+            <p className="text-amber-300/95">
+              Main BIN and compare BIN are identical (same bytes). Load a different tune as compare to see Δ.
+            </p>
+          ) : compareSummary?.kind === 'missing' ? (
+            <p className="text-amber-300/95">
+              No compare data for this map. Reload the compare BIN after the XDF is loaded, or ensure both BINs match
+              the same XDF.
+            </p>
+          ) : compareSummary?.kind === 'ok' && compareSummary.diffCells === 0 ? (
+            <p className="text-dark-text2">
+              Compare active: no differences vs compare BIN in this table (values match).
+            </p>
+          ) : compareSummary?.kind === 'ok' && compareSummary.diffCells > 0 ? (
+            <p className="text-dark-text2">
+              Compare active: {compareSummary.diffCells} cell{compareSummary.diffCells !== 1 ? 's' : ''} differ (max{' '}
+              |Δ| = {formatDeltaDisplay(compareSummary.maxAbs, table.decimalPlaces)}).
+            </p>
+          ) : null}
+        </div>
+      )}
+
+      {stats && (
+        <div className="px-2 py-1 bg-dark-accent/10 border-b border-dark-border text-xs">
+          <div className="flex flex-wrap gap-3">
+            <span>Selected: {stats.count}</span>
+            <span>Min: {formatValue(stats.min, table.decimalPlaces)}</span>
+            <span>Max: {formatValue(stats.max, table.decimalPlaces)}</span>
+            <span>Avg: {formatValue(stats.avg, table.decimalPlaces)}</span>
+            <span>Sum: {formatValue(stats.sum, table.decimalPlaces)}</span>
+          </div>
+        </div>
+      )}
+
+      <div
+        className="overflow-auto scrollbar-thin p-2 outline-none select-none"
+        ref={tableRef}
+        tabIndex={0}
+        onKeyDown={(e) => {
+          if (!selection || selection.tableId !== table.id) return;
+          if ((e.ctrlKey || e.metaKey) && e.key === 'c') {
+            e.preventDefault();
+            const rows: string[] = [];
+            const { minRow, maxRow, minCol, maxCol } = selection.bounds;
+            for (let r = minRow; r <= maxRow; r++) {
+              const line: string[] = [];
+              for (let c = minCol; c <= maxCol; c++) {
+                line.push(String(values[r][c]));
+              }
+              rows.push(line.join('\t'));
+            }
+            void navigator.clipboard.writeText(rows.join('\n'));
+            return;
+          }
+          if ((e.ctrlKey || e.metaKey) && e.key === 'v') {
+            e.preventDefault();
+            if (showRawHex || !binBuffer || !data) return;
+            void (async () => {
+              try {
+                const text = await navigator.clipboard.readText();
+                const clipRows = text.trim().split(/\n/).filter(Boolean);
+                if (clipRows.length === 0) return;
+                const newValues = data.values.map((row) => [...row]);
+                const { minRow, minCol } = selection.bounds;
+                for (let ri = 0; ri < clipRows.length; ri++) {
+                  const cols = clipRows[ri].split(/\t/).map((s) => s.trim());
+                  for (let ci = 0; ci < cols.length; ci++) {
+                    const r = minRow + ri;
+                    const c = minCol + ci;
+                    if (r >= table.rowCount || c >= table.colCount) continue;
+                    const n = parseFloat(cols[ci].replace(',', '.'));
+                    if (Number.isNaN(n)) continue;
+                    const rounded = clampValue(roundValue(n, table.decimalPlaces), table.min, table.max);
+                    newValues[r][c] = rounded;
+                  }
+                }
+                const next = commitFullTableValues(binBuffer, table, data, newValues, addChange);
+                setTableData(table.id, next);
+              } catch {
+                /* clipboard denied */
+              }
+            })();
+          }
+        }}
+      >
+        <table className="w-full border-separate border-spacing-1 select-none">
+          <thead>
+            <tr>
+              <th
+                className={`sticky left-0 z-10 px-2 py-1.5 text-left text-xs font-semibold text-dark-text2 rounded-md backdrop-blur-sm border border-transparent select-none ${
+                  selBounds && heatmapPrefs.axisHighlight ? 'bg-dark-surface2' : 'bg-dark-surface2'
+                }`}
+              >
+                {table.yAxis.units || 'Y'}
+              </th>
+              {xAxisLabels.map((label, idx) => (
+                <th
+                  key={idx}
+                  className={`px-2 py-1.5 text-center text-xs font-semibold text-dark-text2 min-w-[52px] rounded-md backdrop-blur-sm border select-none ${
+                    axisColHighlight(idx)
+                      ? 'border-amber-500/50'
+                      : 'border-transparent bg-dark-surface2/50'
+                  }`}
+                  style={
+                    axisColHighlight(idx)
+                      ? { backgroundColor: heatmapPrefs.axisHighlightColor }
+                      : undefined
+                  }
+                >
+                  {formatValue(label, table.xAxis.decimalPlaces)}
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {values.map((row, rowIdx) => (
+              <tr key={rowIdx}>
+                <td
+                  className={`sticky left-0 z-10 px-2 py-1.5 text-right text-xs font-semibold text-dark-text2 rounded-md backdrop-blur-sm border select-none ${
+                    axisRowHighlight(rowIdx)
+                      ? 'border-amber-500/50'
+                      : 'border-transparent bg-dark-surface2'
+                  }`}
+                  style={
+                    axisRowHighlight(rowIdx)
+                      ? { backgroundColor: heatmapPrefs.axisHighlightColor }
+                      : undefined
+                  }
+                >
+                  {formatValue(yAxisLabels[rowIdx], table.yAxis.decimalPlaces)}
+                </td>
+                {row.map((value, colIdx) => {
+                  const isSelected = isCellSelected(rowIdx, colIdx);
+                  const isEditing = editingCell?.row === rowIdx && editingCell?.col === colIdx;
+                  const cellBg = getCellColor(value);
+                  const cellText = textColorForBackground(cellBg);
+                  const overlay =
+                    isSelected && !isEditing
+                      ? `linear-gradient(rgba(255,255,255,${overlayAlpha}), rgba(255,255,255,${overlayAlpha}))`
+                      : null;
+                  const selectionRing = isSelected
+                    ? `inset 0 0 0 2px ${heatmapPrefs.selectionColor}`
+                    : 'none';
+                  const editingRing = isEditing ? `inset 0 0 0 2px ${heatmapPrefs.activeRingColor}` : 'none';
+                  const boxShadow = [editingRing, selectionRing, '0 1px 2px rgba(0,0,0,0.35)']
+                    .filter((x) => x !== 'none')
+                    .join(', ');
+
+                  const diff =
+                    compareValues &&
+                    compareValues[rowIdx]?.[colIdx] !== undefined
+                      ? value - compareValues[rowIdx][colIdx]
+                      : null;
+
+                  const showDelta =
+                    compareMode && diff !== null && Math.abs(diff) > 1e-12;
+                  const deltaLineStyle = showDelta ? deltaLineStyleForBackground(cellBg) : undefined;
+
+                  return (
+                    <td
+                      key={colIdx}
+                      onMouseDown={(e) => handleCellMouseDown(rowIdx, colIdx, e)}
+                      onMouseEnter={() => handleCellMouseEnter(rowIdx, colIdx)}
+                      onClick={(e) => handleCellClick(rowIdx, colIdx, e)}
+                      onDoubleClick={() => handleCellDoubleClick(rowIdx, colIdx)}
+                      style={{
+                        background: overlay ? `${overlay}, ${cellBg}` : cellBg,
+                        color: cellText,
+                        boxShadow: boxShadow || undefined,
+                        position: 'relative',
+                      }}
+                      className={`${pad} text-center text-xs cursor-pointer rounded-md font-medium transition-[box-shadow,transform] duration-100 ease-out hover:brightness-[1.06] select-none`}
+                    >
+                      {isEditing ? (
+                        <input
+                          type="number"
+                          value={editValue}
+                          onChange={(e) => setEditValue(e.target.value)}
+                          onBlur={handleEditSubmit}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter') handleEditSubmit();
+                            if (e.key === 'Escape') handleEditCancel();
+                          }}
+                          autoFocus
+                          className="w-full bg-dark-surface/95 border border-dark-accent rounded px-1 py-0.5 text-center text-xs text-dark-text focus:outline-none focus:ring-1 focus:ring-dark-accent select-text"
+                          step={Math.pow(10, -table.decimalPlaces)}
+                          min={table.min}
+                          max={table.max}
+                        />
+                      ) : (
+                        <span className="tabular-nums">
+                          {formatValue(value, table.decimalPlaces)}
+                          {showDelta && diff !== null && (
+                            <span
+                              className="block text-[10px] font-semibold leading-tight mt-0.5 tabular-nums"
+                              style={deltaLineStyle}
+                            >
+                              {diff > 0 ? '+' : ''}
+                              {formatDeltaDisplay(diff, table.decimalPlaces)}
+                            </span>
+                          )}
+                        </span>
+                      )}
+                    </td>
+                  );
+                })}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
