@@ -66,16 +66,16 @@ export function ParameterTree() {
   
   if (tables.length === 0) {
     return (
-      <div className="bg-dark-surface border border-dark-border rounded-lg p-2">
-        <p className="text-dark-text2 text-xs">Load an XDF file to see parameters</p>
+      <div className="rounded-lg border border-dark-border bg-dark-surface p-2">
+        <p className="text-xs text-dark-text2">Load an XDF file to see parameters</p>
       </div>
     );
   }
   
   return (
-    <div className="bg-dark-surface border border-dark-border rounded-lg overflow-hidden">
+    <div className="flex h-full min-h-0 flex-col overflow-hidden rounded-lg border border-dark-border bg-dark-surface">
       {/* Search */}
-      <div className="p-2 border-b border-dark-border">
+      <div className="shrink-0 border-b border-dark-border p-2">
         <div className="relative">
           <Search className="absolute left-2 top-1/2 transform -translate-y-1/2 w-3 h-3 text-dark-text2" />
           <input
@@ -89,7 +89,7 @@ export function ParameterTree() {
       </div>
       
       {/* Tree */}
-      <div className="overflow-y-auto scrollbar-thin" style={{ maxHeight: 'calc(100vh - 150px)' }}>
+      <div className="min-h-0 flex-1 overflow-y-auto scrollbar-thin">
         {filteredCategories.map((category, catIdx: number) => {
           const isExpanded = expandedCategories.has(category.index);
           const hasTables = category.tables.length > 0;

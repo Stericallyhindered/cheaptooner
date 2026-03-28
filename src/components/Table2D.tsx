@@ -371,7 +371,12 @@ export function Table2D({ table }: Table2DProps) {
               )}
             </div>
             {table.units && <p className="text-xs text-dark-text2">Units: {table.units}</p>}
-            <p className="text-[10px] text-dark-text2 leading-snug max-w-xl">
+            <p className="text-[10px] leading-snug text-dark-text2 md:hidden">
+              <span className="text-dark-text">Apply to BIN</span> = this map in RAM ·{' '}
+              <span className="text-dark-text">Reset</span> = this map only ·{' '}
+              <span className="text-dark-text">Export BIN</span> = full file
+            </p>
+            <p className="hidden max-w-xl text-[10px] leading-snug text-dark-text2 md:block">
               Edit one map at a time.{' '}
               <span className="text-dark-text">Apply to BIN</span> copies this table into the in-memory
               calibration (other maps stay as last applied).{' '}

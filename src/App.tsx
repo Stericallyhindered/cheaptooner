@@ -15,7 +15,7 @@ function App() {
     <>
       <Layout>
         {selectedTable ? (
-        <div className="flex flex-col h-full">
+        <div className="flex h-full min-h-0 flex-1 flex-col">
           {/* View Mode Toggle */}
           <div className="flex gap-1 bg-dark-surface border border-dark-border rounded p-1 mb-2 flex-shrink-0">
             <button
