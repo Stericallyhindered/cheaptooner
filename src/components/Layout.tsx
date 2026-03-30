@@ -25,7 +25,7 @@ export function Layout({ children }: LayoutProps) {
   }, [selectedTableId]);
 
   return (
-    <div className="min-h-screen bg-dark-bg text-dark-text">
+    <div className="flex min-h-[100dvh] min-h-[100svh] flex-1 flex-col bg-dark-bg text-dark-text">
       {/* Header */}
       <header className="bg-dark-surface border-b border-dark-border">
         <div className="w-full max-w-none px-3 sm:px-4 py-2 flex items-center justify-between gap-3">
@@ -49,7 +49,7 @@ export function Layout({ children }: LayoutProps) {
       </header>
       
       {/* Main Content — stacked on phones; side-by-side from md */}
-      <main className="w-full max-w-none px-3 sm:px-4 py-2 min-h-0 flex flex-col h-[calc(100dvh-5.5rem)] sm:h-[calc(100vh-80px)]">
+      <main className="flex w-full max-w-none flex-1 flex-col min-h-0 overflow-hidden px-3 sm:px-4 py-2 pb-[max(0.5rem,env(safe-area-inset-bottom))]">
         <FileLoader />
 
         <div className="flex flex-col flex-1 min-h-0 gap-2 mt-2">
@@ -87,7 +87,7 @@ export function Layout({ children }: LayoutProps) {
             <aside
               className={`min-h-0 flex w-full shrink-0 flex-col overflow-hidden md:w-64 md:max-h-none ${
                 mobilePanel === 'maps'
-                  ? 'max-h-[min(52vh,520px)] min-h-0 flex-1'
+                  ? 'max-h-[min(50dvh,520px)] min-h-0 flex-1'
                   : 'hidden'
               } md:flex md:flex-none`}
             >

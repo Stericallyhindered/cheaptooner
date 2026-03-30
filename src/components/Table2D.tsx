@@ -64,6 +64,10 @@ export function Table2D({ table }: Table2DProps) {
   const [selecting, setSelecting] = useState(false);
   const [selectStart, setSelectStart] = useState<{ row: number; col: number } | null>(null);
   const dragHappenedRef = useRef(false);
+  const selectStartRef = useRef<{ row: number; col: number } | null>(null);
+  const lastPointerTypeRef = useRef<string | null>(null);
+  const lastTouchTapRef = useRef<{ row: number; col: number; t: number } | null>(null);
+  const pointerListenersCleanupRef = useRef<(() => void) | null>(null);
   const tableRef = useRef<HTMLDivElement>(null);
   const [saveNotice, setSaveNotice] = useState<string | null>(null);
   const saveNoticeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -75,12 +79,15 @@ export function Table2D({ table }: Table2DProps) {
   }, []);
 
   useEffect(() => {
-    const handleMouseUp = () => {
-      setSelecting(false);
+    return () => {
+      pointerListenersCleanupRef.current?.();
+      pointerListenersCleanupRef.current = null;
     };
-    document.addEventListener('mouseup', handleMouseUp);
-    return () => document.removeEventListener('mouseup', handleMouseUp);
   }, []);
+
+  useEffect(() => {
+    selectStartRef.current = selectStart;
+  }, [selectStart]);
 
   useEffect(() => {
     if (!data) return;
@@ -118,6 +125,30 @@ export function Table2D({ table }: Table2DProps) {
   const getCellColor = useCallback(
     (value: number) => valueToHeatmapColor(value, heatmapPrefs, heatRange),
     [heatmapPrefs, heatRange]
+  );
+
+  const applyDragSelection = useCallback(
+    (row: number, col: number) => {
+      const ss = selectStartRef.current;
+      if (!ss) return;
+      dragHappenedRef.current = true;
+      const minRow = Math.min(ss.row, row);
+      const maxRow = Math.max(ss.row, row);
+      const minCol = Math.min(ss.col, col);
+      const maxCol = Math.max(ss.col, col);
+      const cells: Array<{ row: number; col: number }> = [];
+      for (let r = minRow; r <= maxRow; r++) {
+        for (let c = minCol; c <= maxCol; c++) {
+          cells.push({ row: r, col: c });
+        }
+      }
+      setSelection({
+        tableId: table.id,
+        cells,
+        bounds: { minRow, maxRow, minCol, maxCol },
+      });
+    },
+    [setSelection, table.id]
   );
 
   if (!data) {
@@ -184,6 +215,24 @@ export function Table2D({ table }: Table2DProps) {
       dragHappenedRef.current = false;
       return;
     }
+    if (
+      lastPointerTypeRef.current === 'touch' &&
+      !e.shiftKey &&
+      !e.ctrlKey &&
+      !e.metaKey
+    ) {
+      const now = Date.now();
+      const prev = lastTouchTapRef.current;
+      if (prev && prev.row === row && prev.col === col && now - prev.t < 400) {
+        lastTouchTapRef.current = null;
+        lastPointerTypeRef.current = null;
+        const v = values[row][col];
+        setEditingCell({ row, col });
+        setEditValue(v.toString());
+        return;
+      }
+      lastTouchTapRef.current = { row, col, t: now };
+    }
     if (e.shiftKey && selectStart) {
       const minRow = Math.min(selectStart.row, row);
       const maxRow = Math.max(selectStart.row, row);
@@ -237,38 +286,55 @@ export function Table2D({ table }: Table2DProps) {
     }
   };
 
-  const handleCellMouseDown = (row: number, col: number, e: React.MouseEvent) => {
+  const handleCellPointerDown = (row: number, col: number, e: React.PointerEvent) => {
     if (e.button !== 0) return;
+    const t = e.target as HTMLElement | null;
+    if (t?.closest('input, textarea')) return;
+
     e.preventDefault();
+    pointerListenersCleanupRef.current?.();
+    pointerListenersCleanupRef.current = null;
+
+    lastPointerTypeRef.current = e.pointerType === 'touch' ? 'touch' : 'mouse';
     dragHappenedRef.current = false;
+    const start = { row, col };
+    selectStartRef.current = start;
+    setSelectStart(start);
     setSelecting(true);
-    setSelectStart({ row, col });
     setSelection({
       tableId: table.id,
       cells: [{ row, col }],
       bounds: { minRow: row, maxRow: row, minCol: col, maxCol: col },
     });
-  };
 
-  const handleCellMouseEnter = (row: number, col: number) => {
-    if (selecting && selectStart) {
-      dragHappenedRef.current = true;
-      const minRow = Math.min(selectStart.row, row);
-      const maxRow = Math.max(selectStart.row, row);
-      const minCol = Math.min(selectStart.col, col);
-      const maxCol = Math.max(selectStart.col, col);
-      const cells: Array<{ row: number; col: number }> = [];
-      for (let r = minRow; r <= maxRow; r++) {
-        for (let c = minCol; c <= maxCol; c++) {
-          cells.push({ row: r, col: c });
-        }
-      }
-      setSelection({
-        tableId: table.id,
-        cells,
-        bounds: { minRow, maxRow, minCol, maxCol },
-      });
-    }
+    const pid = e.pointerId;
+    const onMove = (ev: PointerEvent) => {
+      if (ev.pointerId !== pid) return;
+      ev.preventDefault();
+      const el = document.elementFromPoint(ev.clientX, ev.clientY);
+      const td = el?.closest('[data-table-cell]') as HTMLElement | null;
+      if (!td || !tableRef.current?.contains(td)) return;
+      const r = parseInt(td.dataset.row ?? '', 10);
+      const c = parseInt(td.dataset.col ?? '', 10);
+      if (Number.isNaN(r) || Number.isNaN(c)) return;
+      applyDragSelection(r, c);
+    };
+    const onUp = (ev: PointerEvent) => {
+      if (ev.pointerId !== pid) return;
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+      window.removeEventListener('pointercancel', onUp);
+      pointerListenersCleanupRef.current = null;
+      setSelecting(false);
+    };
+    window.addEventListener('pointermove', onMove, { passive: false });
+    window.addEventListener('pointerup', onUp);
+    window.addEventListener('pointercancel', onUp);
+    pointerListenersCleanupRef.current = () => {
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+      window.removeEventListener('pointercancel', onUp);
+    };
   };
 
   const handleCellDoubleClick = (row: number, col: number) => {
@@ -372,6 +438,7 @@ export function Table2D({ table }: Table2DProps) {
             </div>
             {table.units && <p className="text-xs text-dark-text2">Units: {table.units}</p>}
             <p className="text-[10px] leading-snug text-dark-text2 md:hidden">
+              Drag to select cells · double-tap a cell to edit ·{' '}
               <span className="text-dark-text">Apply to BIN</span> = this map in RAM ·{' '}
               <span className="text-dark-text">Reset</span> = this map only ·{' '}
               <span className="text-dark-text">Export BIN</span> = full file
@@ -515,7 +582,9 @@ export function Table2D({ table }: Table2DProps) {
       )}
 
       <div
-        className="overflow-auto scrollbar-thin p-2 outline-none select-none"
+        className={`overflow-auto scrollbar-thin p-2 outline-none select-none max-md:p-1 ${
+          selecting ? 'touch-none' : 'touch-manipulation'
+        }`}
         ref={tableRef}
         tabIndex={0}
         onKeyDown={(e) => {
@@ -565,11 +634,11 @@ export function Table2D({ table }: Table2DProps) {
           }
         }}
       >
-        <table className="w-full border-separate border-spacing-1 select-none">
+        <table className="w-full border-separate border-spacing-0.5 max-md:border-spacing-0 select-none max-md:text-[10px]">
           <thead>
             <tr>
               <th
-                className={`sticky left-0 z-10 px-2 py-1.5 text-left text-xs font-semibold text-dark-text2 rounded-md backdrop-blur-sm border border-transparent select-none ${
+                className={`sticky left-0 z-10 px-2 py-1.5 max-md:px-1 max-md:py-1 text-left text-xs max-md:text-[10px] font-semibold text-dark-text2 rounded-md backdrop-blur-sm border border-transparent select-none ${
                   selBounds && heatmapPrefs.axisHighlight ? 'bg-dark-surface2' : 'bg-dark-surface2'
                 }`}
               >
@@ -578,7 +647,7 @@ export function Table2D({ table }: Table2DProps) {
               {xAxisLabels.map((label, idx) => (
                 <th
                   key={idx}
-                  className={`px-2 py-1.5 text-center text-xs font-semibold text-dark-text2 min-w-[52px] rounded-md backdrop-blur-sm border select-none ${
+                  className={`px-2 py-1.5 max-md:px-0.5 max-md:py-0.5 text-center text-xs max-md:text-[10px] font-semibold text-dark-text2 min-w-[52px] max-md:min-w-[28px] rounded-md backdrop-blur-sm border select-none ${
                     axisColHighlight(idx)
                       ? 'border-amber-500/50'
                       : 'border-transparent bg-dark-surface2/50'
@@ -598,7 +667,7 @@ export function Table2D({ table }: Table2DProps) {
             {values.map((row, rowIdx) => (
               <tr key={rowIdx}>
                 <td
-                  className={`sticky left-0 z-10 px-2 py-1.5 text-right text-xs font-semibold text-dark-text2 rounded-md backdrop-blur-sm border select-none ${
+                  className={`sticky left-0 z-10 px-2 py-1.5 max-md:px-1 max-md:py-0.5 text-right text-xs max-md:text-[10px] font-semibold text-dark-text2 rounded-md backdrop-blur-sm border select-none ${
                     axisRowHighlight(rowIdx)
                       ? 'border-amber-500/50'
                       : 'border-transparent bg-dark-surface2'
@@ -641,8 +710,10 @@ export function Table2D({ table }: Table2DProps) {
                   return (
                     <td
                       key={colIdx}
-                      onMouseDown={(e) => handleCellMouseDown(rowIdx, colIdx, e)}
-                      onMouseEnter={() => handleCellMouseEnter(rowIdx, colIdx)}
+                      data-table-cell
+                      data-row={rowIdx}
+                      data-col={colIdx}
+                      onPointerDown={(e) => handleCellPointerDown(rowIdx, colIdx, e)}
                       onClick={(e) => handleCellClick(rowIdx, colIdx, e)}
                       onDoubleClick={() => handleCellDoubleClick(rowIdx, colIdx)}
                       style={{
@@ -651,7 +722,7 @@ export function Table2D({ table }: Table2DProps) {
                         boxShadow: boxShadow || undefined,
                         position: 'relative',
                       }}
-                      className={`${pad} text-center text-xs cursor-pointer rounded-md font-medium transition-[box-shadow,transform] duration-100 ease-out hover:brightness-[1.06] select-none`}
+                      className={`${pad} max-md:!px-0.5 max-md:!py-0.5 text-center text-xs max-md:text-[10px] cursor-pointer rounded-md font-medium transition-[box-shadow,transform] duration-100 ease-out hover:brightness-[1.06] select-none max-md:min-w-[28px]`}
                     >
                       {isEditing ? (
                         <input
